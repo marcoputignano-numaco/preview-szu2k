@@ -1,0 +1,204 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="robots" content="noindex, nofollow">
+<meta name="referrer" content="no-referrer">
+<title>Private preview</title>
+<style id="pv-lock-style">
+  :root { color-scheme: light; }
+  body { margin: 0; min-height: 100vh; display: grid; place-items: center; padding: 1.5rem 1rem; box-sizing: border-box;
+    background: #eef1f5; color: #14213d; font: 400 1rem/1.5 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif; }
+  .lock { width: 100%; max-width: 24rem; background: #fff; border: 1px solid #dde2ea; border-radius: 14px; padding: 2rem 1.6rem;
+    box-shadow: 0 20px 50px rgba(10, 30, 70, 0.08); }
+  h1 { margin: 0 0 0.4rem; font-size: 1.4rem; line-height: 1.2; }
+  p { margin: 0 0 1.2rem; color: #3b4a66; }
+  label { display: block; font-weight: 700; margin-bottom: 0.35rem; }
+  input { width: 100%; box-sizing: border-box; min-height: 48px; padding: 0.6rem 0.8rem; font: inherit; font-size: 1.1rem;
+    letter-spacing: 0.06em; border: 1.5px solid #cdd5e4; border-radius: 8px; color: #14213d; background: #fff; }
+  input:focus { outline: 3px solid rgba(10, 51, 134, 0.3); border-color: #0a3386; }
+  button { margin-top: 0.9rem; width: 100%; min-height: 48px; border: 0; border-radius: 999px; background: #0a3386; color: #fff;
+    font: inherit; font-weight: 700; cursor: pointer; }
+  button:disabled { opacity: 0.6; cursor: progress; }
+  .msg { min-height: 1.5em; margin: 0.9rem 0 0; font-weight: 600; color: #3b4a66; }
+  .msg.bad { color: #a4262c; }
+</style>
+</head>
+<body>
+<main class="lock">
+  <form id="pv-form" autocomplete="off">
+    <h1>Private preview</h1>
+    <p>Enter the code you were given to open this page.</p>
+    <label for="pv-code">Code</label>
+    <input id="pv-code" name="code" required autocapitalize="characters" spellcheck="false" autofocus>
+    <button type="submit">Open</button>
+    <p class="msg" id="pv-msg" role="status"></p>
+  </form>
+</main>
+<script>
+(function () {
+  var PV = {"salt":"7cFdXD04PNbZz74JRVnYsQ==","iterations":600000,"slots":["vXqae4532D+2o1JhaZMyoMQo0kIJlFBecetgdZDgtpmI38Z+iT6s44Pj5QlnJIg3Sljk1Oz8oYY/1jmW"],"manifest":"d/825e6e2a0a4f5f65.bin","remember":"pv:preview-szu2k"};
+  var form = document.getElementById("pv-form");
+  var input = document.getElementById("pv-code");
+  var msg = document.getElementById("pv-msg");
+  var button = form.querySelector("button");
+  var say = function (text, bad) { msg.textContent = text; msg.className = bad ? "msg bad" : "msg"; };
+  var store = {
+    get: function () { try { return localStorage.getItem(PV.remember); } catch (e) { return null; } },
+    set: function (v) { try { localStorage.setItem(PV.remember, v); } catch (e) {} },
+    clear: function () { try { localStorage.removeItem(PV.remember); } catch (e) {} },
+  };
+  if (!window.crypto || !crypto.subtle || !window.fetch || !window.Promise) {
+    say("This browser cannot open the page. Please try a recent Chrome, Edge, Firefox or Safari.", true);
+    button.disabled = true;
+    return;
+  }
+  var b64 = function (s) { return Uint8Array.from(atob(s), function (c) { return c.charCodeAt(0); }); };
+  var normalize = function (c) { return c.toUpperCase().replace(/[^A-Z0-9]/g, ""); };
+  var open = function (key, bytes) {
+    return crypto.subtle.decrypt({ name: "AES-GCM", iv: bytes.slice(0, 12) }, key, bytes.slice(12)).then(function (b) { return new Uint8Array(b); });
+  };
+  var get = function (path) {
+    return fetch(path).then(function (r) { if (!r.ok) throw new Error(path + " " + r.status); return r.arrayBuffer(); }).then(function (b) { return new Uint8Array(b); });
+  };
+
+  // The content key: derived from the code, then tried against each stored copy of the key.
+  var contentKey = function (code) {
+    return crypto.subtle
+      .importKey("raw", new TextEncoder().encode(code), "PBKDF2", false, ["deriveKey"])
+      .then(function (base) {
+        return crypto.subtle.deriveKey({ name: "PBKDF2", salt: b64(PV.salt), iterations: PV.iterations, hash: "SHA-256" }, base, { name: "AES-GCM", length: 256 }, false, ["decrypt"]);
+      })
+      .then(function (kek) {
+        return PV.slots.reduce(function (found, slot) {
+          return found.then(function (raw) { return raw || open(kek, b64(slot)).catch(function () { return null; }); });
+        }, Promise.resolve(null));
+      })
+      .then(function (raw) { return raw && crypto.subtle.importKey("raw", raw, "AES-GCM", false, ["decrypt"]); });
+  };
+
+  var K, M;
+  var cache = {};
+  // One decrypted copy per file, shared by the page, the clip buttons and the background fetch.
+  var load = function (path) {
+    if (!cache[path]) {
+      var f = M.files[path];
+      var p = get(f[0]).then(function (bytes) { return open(K, bytes); }).then(function (plain) {
+        p.url = URL.createObjectURL(new Blob([plain], { type: f[1] }));
+        return p.url;
+      });
+      cache[path] = p;
+    }
+    return cache[path];
+  };
+  // Called by the clip player instead of setting the clip's address. If the clip is not decrypted
+  // yet, play() inside the click keeps the browser's permission to play it with sound once it is.
+  window.PV_MEDIA = function (path, video) {
+    var p = load(path);
+    if (p.url) { video.src = p.url; return; }
+    var first = video.play();
+    if (first && first.catch) first.catch(function () {});
+    p.then(function (url) {
+      video.src = url;
+      var again = video.play();
+      if (again && again.catch) again.catch(function () {});
+    });
+  };
+
+  // Called by the hero for its film: the decrypted copy's address, without playing it.
+  window.PV_SRC = function (path) { return load(path); };
+  var LANDINGS = ["/","/de/","/it/"];
+
+  var render = function () {
+    // Which page: "#/de/" and the like are pages, "#/de/@demo" a page and a place on it; anything
+    // else is the English landing page.
+    var parse = function (hash) {
+      if (hash.indexOf("#/") !== 0) return null;
+      var parts = hash.slice(1).split("@");
+      return { route: M.pages[parts[0]] ? parts[0] : "/", anchor: parts[1] || "" };
+    };
+    var where = parse(location.hash) || { route: "/", anchor: "" };
+    var route = where.route;
+    var page = M.pages[route];
+    return Promise.all(M.eager.map(function (path) { return load(path).then(function (url) { return [path, url]; }); })).then(function (pairs) {
+      var css = M.css, body = page.body;
+      pairs.forEach(function (pair) {
+        css = css.split('"' + pair[0] + '"').join('"' + pair[1] + '"');
+        body = body.split('"' + pair[0] + '"').join('"' + pair[1] + '"');
+      });
+      window.PV_CUES = M.cues;
+      document.title = page.title;
+      document.documentElement.lang = page.lang;
+      document.getElementById("pv-lock-style").remove();
+      var style = document.createElement("style");
+      style.textContent = css;
+      document.head.appendChild(style);
+      // What the site's own <head> does (Base.astro), before the content arrives: the rise-in
+      // needs it to hide what has not been scrolled to yet.
+      document.documentElement.classList.add("js");
+      document.body.innerHTML = body;
+      // Scripts put in with innerHTML do not run: each is replaced by a live copy, in order.
+      document.body.querySelectorAll("script").forEach(function (old) {
+        var s = document.createElement("script");
+        s.textContent = old.textContent;
+        old.replaceWith(s);
+      });
+      var place = where.anchor || (location.hash.indexOf("#/") === 0 ? "" : location.hash.slice(1));
+      var target = place && document.getElementById(place);
+      if (target) target.scrollIntoView();
+      else window.scrollTo(0, 0);
+      // Moving between pages reloads, which opens the other page with the remembered code: each
+      // page then starts clean, with only its own scripts running.
+      window.addEventListener("hashchange", function () {
+        var next = parse(location.hash);
+        if (!next) return;
+        if (next.route !== route) return location.reload();
+        var spot = next.anchor && document.getElementById(next.anchor);
+        if (spot) spot.scrollIntoView();
+        else window.scrollTo(0, 0);
+      });
+      if (LANDINGS.indexOf(route) < 0) return;
+      // The clips, one after another in the background, so a click finds its clip ready.
+      M.clips.reduce(function (chain, path) {
+        return chain.then(function () { return load(path).catch(function () {}); });
+      }, Promise.resolve());
+    });
+  };
+
+  var unlock = function (code, remembered) {
+    button.disabled = true;
+    say("Opening\u2026");
+    return contentKey(code)
+      .then(function (key) {
+        if (!key) {
+          if (remembered) { store.clear(); say(""); } else { say("That code does not open this page. Check it and try again.", true); }
+          button.disabled = false;
+          return;
+        }
+        K = key;
+        return get(PV.manifest)
+          .then(function (bytes) { return open(K, bytes); })
+          .then(function (plain) {
+            M = JSON.parse(new TextDecoder().decode(plain));
+            store.set(code);
+            return render();
+          });
+      })
+      .catch(function () {
+        say("The page could not be opened. Check the connection and try again.", true);
+        button.disabled = false;
+      });
+  };
+
+  form.addEventListener("submit", function (event) {
+    event.preventDefault();
+    var code = normalize(input.value);
+    if (code) unlock(code, false);
+  });
+  var saved = store.get();
+  if (saved) unlock(saved, true);
+})();
+</script>
+</body>
+</html>
